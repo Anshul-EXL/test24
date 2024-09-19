@@ -1,0 +1,35 @@
+INFO:root:Loaded 20 questions for Digital Solution.
+INFO:root:Loaded 51 questions for EXL Health Overview.
+INFO:root:Loaded 1956 questions for Clinical Services.
+INFO:root:Total questions loaded across all services: 2027
+INFO:root:Loaded 20 questions for Digital Solution.
+INFO:root:Loaded 51 questions for EXL Health Overview.
+INFO:root:Loaded 1956 questions for Clinical Services.
+INFO:root:Total questions loaded across all services: 2027
+INFO:root:Loaded 20 questions for Digital Solution.
+INFO:root:Loaded 51 questions for EXL Health Overview.
+INFO:root:Loaded 1956 questions for Clinical Services.
+INFO:root:Total questions loaded across all services: 2027
+INFO:root:Loaded 1956 questions for the selected category.
+INFO:root:Score for main question 'What is EXL Clinical Services?': 59
+INFO:root:Score for main question 'What pain points does EXL Clinical Services solve?': 53
+INFO:root:Score for main question 'Who benefits from EXL Clinical Services?': 49
+INFO:root:Score for main question 'What roles are targeted by EXL Clinical Services?': 51
+INFO:root:Score for main question 'How should I pitch EXL Clinical Services to a potential client?': 38
+INFO:root:Score for main question 'What resources are available for EXL Clinical Services?': 52
+INFO:root:Score for main question 'What is Utilization Management?': 42
+INFO:root:Score for main question 'What email templates can I use to pitch EXL Clinical Services?': 45
+INFO:root:Score for main question 'Do you have a calling script for pitching EXL Clinical Services?': 40
+INFO:root:Score for main question 'What is EXL's approach to global clinical domain expertise?': 48
+INFO:root:Score for main question 'How flexible is EXL's delivery model?': 41
+INFO:root:Score for main question 'What is EXL’s approach to client-driven recruiting?': 50
+INFO:root:Score for main question 'What types of interdisciplinary skills and credentials does EXL provide?': 44
+INFO:root:Score for main question 'How does EXL Health utilize global delivery?': 52
+INFO:root:Score for main question 'What are EXL's key metrics?': 50
+INFO:root:Score for main question 'What metrics does EXL Health use to measure success in clinical services?': 53
+INFO:root:Score for main question 'How does EXL Health handle data security and privacy in clinical services?': 45
+INFO:root:Score for main question 'What training and development programs are available for EXL Health's clinical team?': 38
+INFO:root:Score for main question 'What makes EXL Health’s clinical services stand out from competitors?': 51
+INFO:root:Score for main question 'What are EXL Health’s key partnerships in the healthcare industry?': 47
+INFO:root:Best match: What is EXL Clinical Services? with score: 59
+WARNING:root:No match found above the threshold.

@@ -1,0 +1,157 @@
+import streamlit as st
+import json
+import openai
+import random
+import os
+
+# Set your OpenAI API key here
+openai.api_key = "your-openai-api-key"
+
+# Function to load email templates from all available JSON files in the 'data/' directory
+def load_email_templates():
+    templates = []
+    data_folder = 'data/emails'  # Path to your data folder containing JSON files for each category
+
+    for file_name in os.listdir(data_folder):
+        if file_name.endswith('.json'):
+            with open(os.path.join(data_folder, file_name), 'r') as file:
+                try:
+                    data = json.load(file)
+                    # Assuming the data has categories as keys and lists of templates as values
+                    for category, category_templates in data.items():
+                        if isinstance(category_templates, list):
+                            templates.extend(category_templates)  # Combine all templates across categories
+                        else:
+                            st.error(f"Error: The category '{category}' in file '{file_name}' does not contain a list of templates.")
+                except json.JSONDecodeError:
+                    st.error(f"Error: Could not parse the JSON file '{file_name}'.")
+    return templates
+
+# Function to generate email content with user inputs
+def generate_email_content(template, recipient_name, recipient_title, company_name, service_name, pain_points, key_metrics, case_study_name, case_study_outcome, testimonial, cta, your_name, your_title, contact_info):
+    subject = template.get('subject', 'EXL Health Solutions').replace("[Service Name]", service_name)
+
+    body = template.get('body', '').replace("[Recipient's Name]", recipient_name or "[Recipient's Name]") \
+        .replace("[Recipient's Title]", recipient_title or "[Recipient's Title]") \
+        .replace("[Company Name]", company_name or "[Company Name]") \
+        .replace("[Service Name]", service_name or "[Service Name]") \
+        .replace("[Pain Points]", pain_points or "[Pain Points]") \
+        .replace("[Key Metrics]", key_metrics or "[Key Metrics]") \
+        .replace("[Case Study Name]", case_study_name or "[Case Study Name]") \
+        .replace("[Case Study Outcome]", case_study_outcome or "[Case Study Outcome]") \
+        .replace("[Testimonial]", testimonial or "[Testimonial]") \
+        .replace("[CTA]", cta or "[CTA]") \
+        .replace("[Your Name]", your_name or "[Your Name]") \
+        .replace("[Your Title]", your_title or "[Your Title]") \
+        .replace("[Your Contact Information]", contact_info or "[Your Contact Information]")
+
+    return subject, body
+
+# Function to generate AI email using OpenAI GPT-3.5 (optional)
+def generate_email_with_openai(service_name, recipient_name, recipient_title, company_name, pain_points, key_metrics, case_study_name, case_study_outcome, testimonial, cta, your_name, your_title, contact_info):
+    try:
+        email_context = f"""
+        Service: {service_name}
+        Recipient: {recipient_name}
+        Recipient Title: {recipient_title}
+        Company: {company_name}
+        Pain Points: {pain_points}
+        Key Metrics: {key_metrics}
+        Case Study: {case_study_name} - {case_study_outcome}
+        Testimonial: {testimonial}
+        CTA: {cta}
+        From: {your_name} ({your_title}, {contact_info})
+        """
+
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # You can use GPT-4 if available
+            messages=[
+                {"role": "system", "content": "You are an email writing assistant."},
+                {"role": "user", "content": f"Write an email for the following context: {email_context}"}
+            ],
+            max_tokens=300
+        )
+        email_content = response['choices'][0]['message']['content']
+        return email_content
+    except Exception as e:
+        return f"Error generating email with OpenAI: {str(e)}"
+
+# Main function for the email generation UI
+def email_generation_ui():
+    st.title("Email Template Generator")
+
+    # Load all templates from multiple JSON files
+    templates = load_email_templates()
+    if not templates:
+        st.warning("No email templates found.")
+        return
+
+    # Customization inputs (input once and apply to all emails)
+    recipient_name = st.text_input("Recipient's Name", "", key="recipient_name")
+    recipient_title = st.text_input("Recipient's Title", "", key="recipient_title")
+    company_name = st.text_input("Company Name", "", key="company_name")
+    service_name = st.text_input("Service Name (e.g., Utilization Managment)", "", key="service_name")
+    pain_points = st.text_area("Pain Points (e.g., Cost Managment, Operational Inefficiencies)"  , "", key="pain_points")
+    key_metrics = st.text_input("Key Metrics (e.g., 20% reduction in costs)", "", key="key_metrics")
+    case_study_name = st.text_input("Case Study Name", "", key="case_study_name")
+    case_study_outcome = st.text_input("Case Study Outcome", "", key="case_study_outcome")
+    testimonial = st.text_area("Testimonial", "Here's what one of our clients said...", key="testimonial")
+    cta = st.text_input("Call-to-Action (CTA)", "Can we schedule a call next week?", key="cta")
+
+    your_name = st.text_input("Your Name", "", key="your_name")
+    your_title = st.text_input("Your Title", "", key="your_title")
+    contact_info = st.text_input("Your Contact Information", "", key="contact_info")
+
+    num_variations = st.slider("How many email variations to generate?", min_value=1, max_value=50, value=5)
+
+    if st.button("Generate Emails", key="generate_email_button"):
+        for idx in range(num_variations):
+            # Randomly select any template from the available templates
+            template = random.choice(templates)
+
+            # Check if template is a dictionary and contains required keys
+            if isinstance(template, dict) and 'service_category' in template:
+                subject, email_content = generate_email_content(
+                    template,
+                    recipient_name,
+                    recipient_title,
+                    company_name,
+                    service_name,
+                    pain_points,
+                    key_metrics,
+                    case_study_name,
+                    case_study_outcome,
+                    testimonial,
+                    cta,
+                    your_name,
+                    your_title,
+                    contact_info
+                )
+                st.subheader(f"Generated Email {idx+1} - {subject}")
+                st.text_area(f"Email Body {idx+1}", email_content, height=300)
+
+                # Option to generate AI-based email content
+                if st.button(f"Generate AI Email {idx}", key=f"generate_ai_email_{idx}"):
+                    ai_email = generate_email_with_openai(
+                        service_name,
+                        recipient_name,
+                        recipient_title,
+                        company_name,
+                        pain_points,
+                        key_metrics,
+                        case_study_name,
+                        case_study_outcome,
+                        testimonial,
+                        cta,
+                        your_name,
+                        your_title,
+                        contact_info
+                    )
+                    st.subheader(f"AI-Generated Email {idx+1}")
+                    st.text_area(f"AI Email Body {idx+1}", ai_email, height=300)
+            else:
+                st.error(f"Invalid template structure or missing 'service_category' key in template: {template}")
+
+# Run the app
+if __name__ == "__main__":
+    email_generation_ui()
