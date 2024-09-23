@@ -3,6 +3,7 @@ import glob
 import logging
 from fuzzywuzzy import fuzz
 from transformers import pipeline
+import fitz  # PyMuPDF for extracting text from PDFs
 import random
 
 # Setup logging for debugging purposes
@@ -28,14 +29,14 @@ def load_qa_data():
             category = data.get("service")  # Get the service category from the JSON
 
             # Handle cases where the key might be 'questions' or 'question'
-            questions_data = data.get("questions") or data.get("question")
+            questions_data = data.get("questions")
 
-            if questions_data:  # If the file contains a 'questions' or 'question' key
+            if questions_data:  # If the file contains a 'questions' key
                 # Ensure the questions are a list of dictionaries
                 if isinstance(questions_data, list):
                     valid_questions = []
                     for question_entry in questions_data:
-                        if isinstance(question_entry, dict) and 'question' in question_entry:
+                        if isinstance(question_entry, dict) and 'question' in question_entry and 'answers' in question_entry:
                             valid_questions.append(question_entry)
                             total_questions += 1
                             logging.debug(f"Loaded question: {question_entry['question']} from service {category}")
@@ -45,6 +46,65 @@ def load_qa_data():
     
     logging.info(f"Total questions loaded: {total_questions}")
     return all_data
+
+# Function to find the best matching question and answer
+
+def find_best_match(user_question, questions, threshold=70):
+    """
+    Find the best matching question based on fuzzy string matching.
+    Handles questions with or without 'variations' field.
+    Returns the best-matching answer and its match score if above the threshold.
+    """
+    best_match = None
+    highest_score = 0
+    best_answer = None
+
+    logging.debug(f"Loaded {len(questions)} questions for this category.")
+
+    for entry in questions:
+        if "answers" not in entry or not entry["answers"]:  # Skip questions without answers
+            logging.warning(f"Skipping question without answer: {entry.get('question', 'No Question')}")
+            continue
+
+        # Compare user question with the main question
+        score = fuzz.ratio(user_question.lower(), entry["question"].lower())
+        logging.debug(f"Score for main question '{entry['question']}': {score}")
+
+        if score > highest_score:
+            highest_score = score
+            best_match = entry["question"]
+            # Concatenate all answers in the 'answers' list
+            best_answer = "\n".join(entry["answers"])  # Combine all the answers into a single string
+
+        # If 'variations' field exists, compare the user question with the variations as well
+        if "variations" in entry and isinstance(entry["variations"], list):
+            for variation in entry["variations"]:
+                logging.debug(f"Comparing with variation: {variation}")
+                score = fuzz.ratio(user_question.lower(), variation.lower())
+                logging.debug(f"Score for variation '{variation}': {score}")
+                if score > highest_score:
+                    highest_score = score
+                    best_match = variation
+                    best_answer = "\n".join(entry["answers"])  # Combine all the answers into a single string
+
+    logging.debug(f"Best match: {best_match} with score: {highest_score}")
+
+    if highest_score >= threshold:
+        return best_answer, highest_score
+
+    return None, highest_score
+
+# Function to generate a longer response using the QA pipeline
+def generate_longer_response(question, context):
+    """
+    Generate a detailed response using the QA model with a provided context.
+    """
+    try:
+        result = qa_pipeline(question=question, context=context)
+        return result['answer'], result['score']
+    except Exception as e:
+        logging.error(f"Error generating longer response: {e}")
+        return None, 0.0
 
 # Function to extract text from PDF files using PyMuPDF
 def extract_text_from_pdf(pdf_path):
@@ -60,68 +120,6 @@ def extract_text_from_pdf(pdf_path):
     except Exception as e:
         logging.error(f"Error extracting text from PDF: {str(e)}")
         return ""
-
-# Function to find the best matching question and answer
-def find_best_match(user_question, questions, threshold=70):
-    """
-    Find the best matching question based on fuzzy string matching.
-    Handles questions with or without 'variations' field.
-    Returns the best-matching answer and its match score if above the threshold.
-    """
-    best_match = None
-    highest_score = 0
-    best_answer = None
-
-    # DEBUG: Track the number of questions loaded
-    logging.debug(f"Loaded {len(questions)} questions for this category.")
-
-    for entry in questions:
-        if "answer" not in entry or not entry["answer"]:  # Skip questions without answers
-            logging.warning(f"Skipping question without answer: {entry.get('question', 'No Question')}")
-            continue
-
-        # DEBUG: Print each question and the user's question for comparison
-        logging.debug(f"Comparing with main question: {entry['question']}")
-
-        # Compare user question with the main question
-        score = fuzz.ratio(user_question.lower(), entry["question"].lower())
-        logging.debug(f"Score for main question '{entry['question']}': {score}")  # DEBUG
-
-        if score > highest_score:
-            highest_score = score
-            best_match = entry["question"]
-            best_answer = entry["answer"]
-
-        # If 'variations' field exists, compare the user question with the variations as well
-        if "variations" in entry and isinstance(entry["variations"], list):
-            for variation in entry["variations"]:
-                logging.debug(f"Comparing with variation: {variation}")  # DEBUG
-                score = fuzz.ratio(user_question.lower(), variation.lower())
-                logging.debug(f"Score for variation '{variation}': {score}")  # DEBUG
-                if score > highest_score:
-                    highest_score = score
-                    best_match = variation
-                    best_answer = entry["answer"]
-
-    # DEBUG: Print the best match and the highest score
-    logging.debug(f"Best match: {best_match} with score: {highest_score}")  # DEBUG
-
-    # Return the best match if it exceeds the threshold score
-    if highest_score >= threshold:
-        logging.debug(f"Returning best match: {best_answer} with score: {highest_score}")  # DEBUG
-        return best_answer, highest_score
-    
-    # If no match is found above the threshold
-    logging.debug("No match found above the threshold.")  # DEBUG
-    return None, highest_score
-
-# Function to generate a longer response using the QA pipeline
-def generate_longer_response(question, context):
-    """
-    Generate a detailed response using the QA model with a provided context.
-    """
-    result = qa_pipeline(question=question, context=context)
-    return result['answer'], result['score']
 
 # Function to suggest related questions based on fuzzy matching
 def suggest_related_questions(user_question, questions, threshold=60, num_suggestions=3):
