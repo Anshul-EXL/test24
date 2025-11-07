@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Streamlit page: Sales Navigator → (optional) ZoomInfo Enrichment (Split Flow)
-# Edge logic unchanged. Chrome attaches to an existing Chrome at --remote-debugging-port=9222.
-# Added: Preflight credits, incremental batching with ETA, WAL+indexes, encrypted cookie cache (TTL).
+# Edge logic unchanged (same driver launch as before). Chrome attaches to an existing
+# Chrome started with --remote-debugging-port=9222.
 
-import os, ssl, time, json, random, re, unicodedata, math, base64
-from datetime import datetime, timedelta
+import os, ssl, time, json, random, re, unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +13,7 @@ import requests
 import streamlit as st
 
 # ===== Streamlit FIRST call =====
-st.set_page_config(page_title="EXL — Harvester (SN → ZoomInfo) | Perf+UX", page_icon="🧲", layout="wide")
+st.set_page_config(page_title="EXL — Harvester (SN → ZoomInfo) | Edge (unchanged) + Chrome@9222", page_icon="🧲", layout="wide")
 
 # Optional top-nav
 try:
@@ -49,24 +49,12 @@ try:
 except Exception:
     HAVE_PYPERCLIP = False
 
-# ---------- Optional crypto for encrypted cookie cache ----------
-FERNET = None
-try:
-    from cryptography.fernet import Fernet
-    key_env = os.getenv("EXL_COOKIE_KEY", "").strip()
-    if key_env:
-        FERNET = Fernet(key_env.encode("utf-8"))
-except Exception:
-    FERNET = None
-
 # ----------------- Paths / Config -----------------
 BASE = Path.cwd()
 FILES_DIR = BASE / "Files"
 UPLOADS_DIR = BASE / "Uploads"
-CACHE_DIR = BASE / ".cache_secure"
 FILES_DIR.mkdir(exist_ok=True)
 UPLOADS_DIR.mkdir(exist_ok=True)
-CACHE_DIR.mkdir(exist_ok=True)
 
 SP_FOLDER = st.text_input(
     "SharePoint folder (for logs/credits)",
@@ -85,8 +73,8 @@ st.caption(f"DB: `{DB_PATH}`")
 # ===== Global state  =====
 # =========================
 ss = st.session_state
-ss.setdefault("driver", None)
-ss.setdefault("browser_choice", "Edge (unchanged)")
+ss.setdefault("driver", None)                # Selenium driver (Edge/Chrome)
+ss.setdefault("browser_choice", "Edge")      # "Edge" or "Chrome"
 ss.setdefault("chrome_debug_addr", "127.0.0.1:9222")
 ss.setdefault("sn_headers", None)
 ss.setdefault("sn_cookies", None)
@@ -96,7 +84,6 @@ ss.setdefault("sn_url_template", "")
 ss.setdefault("df_sn", pd.DataFrame())          # Phase 1 result
 ss.setdefault("df_enriched", pd.DataFrame())    # Phase 2 result
 ss.setdefault("username", "")
-ss.setdefault("last_successful_page", -1)       # batching status
 
 def push_msg(m: str):
     ss.sn_messages.append(m)
@@ -118,7 +105,7 @@ REQ_TIMEOUT = (5, 30)
 # =========================
 # ===== Selenium init  ====
 # =========================
-# EDGE — SAME LOGIC as before
+# EDGE — KEEPING SAME LOGIC as before (webdriver_manager → EdgeService → webdriver.Edge)
 def get_edge_driver() -> RemoteWebDriver:
     binary = EdgeChromiumDriverManager().install()
     opts = EdgeOptions()
@@ -128,7 +115,19 @@ def get_edge_driver() -> RemoteWebDriver:
     driver.set_window_size(1400, 900)
     return driver
 
-# CHROME — attach to existing Chrome @ debug port
+# If your original code used a fixed msedgedriver.exe path, uncomment this and set EDGE_DRIVER_PATH:
+# def get_edge_driver() -> RemoteWebDriver:
+#     edge_driver_path = os.getenv("EDGE_DRIVER_PATH")  # e.g., r"C:\msdriver\msedgedriver.exe"
+#     if not edge_driver_path:
+#         raise RuntimeError("Set EDGE_DRIVER_PATH to your msedgedriver.exe")
+#     opts = EdgeOptions()
+#     opts.add_argument("start-maximized")
+#     service = EdgeService(edge_driver_path)
+#     driver = webdriver.Edge(service=service, options=opts)
+#     driver.set_window_size(1400, 900)
+#     return driver
+
+# CHROME — ATTACH to existing Chrome @ debug port (no change to Edge flow)
 def get_chrome_driver_attach(debug_addr: str = "127.0.0.1:9222") -> RemoteWebDriver:
     path = ChromeDriverManager().install()
     opts = ChromeOptions()
@@ -252,30 +251,7 @@ def url_sales(address_sales: str) -> str:
 # =========================
 # ===== Credits (SP)  =====
 # =========================
-def _read_sp_credits(username: str) -> tuple[int, int]:
-    """Return (used_in_25h, remaining) without writing logs. Limit=5000."""
-    past = "No"
-    limit = 5000
-    url = SP_FOLDER.rstrip("/") + "/" + SP_LOG_FILE
-    r = SES.get(url, cookies=ss.sp_cookies or {}, timeout=REQ_TIMEOUT)
-    if r.status_code != 200:
-        return (0, limit)  # unknown; show nothing
-    tmp = FILES_DIR / "sn_log_tmp.xlsx"
-    tmp.write_bytes(r.content)
-    df = pd.read_excel(tmp).iloc[:, 1:]
-    if "Username" not in df.columns or "Time" not in df.columns or "Past" not in df.columns:
-        return (0, limit)
-    now_ = datetime.now()
-    df["difference"] = df["Time"].apply(lambda x: (now_ - datetime.strptime(x, "%m/%d/%y,%H:%M:%S")).total_seconds() / 3600)
-    df = df[(df["difference"] < 25) & (df["Past"] == past) & (df["Username"] == username)]
-    used = int(df["credits"].sum()) if not df.empty else 0
-    return (used, max(0, limit - used))
-
 def credit_limit_sn(num: int, username: str) -> int:
-    """
-    Original logging/limit function; writes usage rows when OK.
-    Returns 0 if OK to proceed, -1 if not.
-    """
     past = "No"
     limit = 5000
     url = SP_FOLDER.rstrip("/") + "/" + SP_LOG_FILE
@@ -437,7 +413,6 @@ def zoom_enrich(df_in: pd.DataFrame, driver: RemoteWebDriver, max_rows: int | No
     output = []
     prog = st.progress(0.0, text="ZoomInfo enrichment in progress…")
     total = max(1, len(rows))
-    t0 = time.time()
 
     for idx, (full, comp) in enumerate(rows, start=1):
         inner = [full, comp]
@@ -496,15 +471,100 @@ def zoom_enrich(df_in: pd.DataFrame, driver: RemoteWebDriver, max_rows: int | No
 
         inner.append(copied_value)
         output.append(inner)
-
-        elapsed = max(0.001, time.time() - t0)
-        rate_rpm = (idx / elapsed) * 60.0
-        eta_sec = (total - idx) * (elapsed / idx)
-        prog.progress(idx / total, text=f"ZoomInfo… {idx}/{total} | {rate_rpm:0.0f} rows/min | ETA {eta_sec/60:0.1f} min")
+        prog.progress(idx / total, text=f"ZoomInfo enrichment… {idx}/{total}")
 
     prog.empty()
     email_df = pd.DataFrame(output, columns=["fullName", "companyName", "Email"])
     return df_in.merge(email_df, on=["fullName", "companyName"], how="left")
+
+# =========================
+# ===== Lead harvest   ====
+# =========================
+def Lead_details_SN_only(url_template: str, cookies_: dict, headers_: dict, username: str, driver: RemoteWebDriver, include_teamlinks: bool = True, include_buying: bool = True) -> pd.DataFrame:
+    list1 = ["fullName", "lastName", "firstName", "geoRegion"]
+    list2 = ["companyName", "title", "tenureAtPosition", "tenureAtCompany"]
+    list4 = ["numYears", "numMonths"]
+
+    total_leads = []
+    n = 0
+    total_available = 0
+
+    while n == 0:
+        url = url_template.format(start=n)
+        r = SES.get(url, cookies=cookies_, headers=headers_, timeout=REQ_TIMEOUT)
+
+        if n == 0:
+            try:
+                js = r.json()
+                total_available = js["paging"]["total"]
+            except Exception:
+                push_msg("Sales API returned non-JSON. Re-login to Sales Navigator.")
+                return pd.DataFrame()
+
+            if total_available > 2400:
+                push_msg("Search exceeds 2400 leads. Narrow filters.")
+                return pd.DataFrame()
+
+            if credit_limit_sn(total_available, username) != 0:
+                return pd.DataFrame()
+
+        if r.status_code != 200:
+            push_msg("Sales API error. Re-login to Sales Navigator.")
+            return pd.DataFrame()
+
+        js = r.json()
+        elements = js.get("elements", [])
+        if not elements:
+            break
+
+        for lead in elements:
+            indv = []
+            for k in list1:
+                indv.append(lead.get(k, ""))
+
+            try:
+                profile_ID = lead["entityUrn"].split("(")[1].split(",")[0]
+                indv += [f"https://www.linkedin.com/sales/lead/{profile_ID},", f"https://www.linkedin.com/in/{profile_ID}"]
+            except Exception:
+                indv += ["", ""]
+
+            for j in range(len(list2)):
+                if j < 2:
+                    try:
+                        indv.append(lead["currentPositions"][0][list2[j]])
+                    except Exception:
+                        indv.append("")
+                else:
+                    for k in list4:
+                        try:
+                            indv.append(lead["currentPositions"][0][list2[j]][k])
+                        except Exception:
+                            indv.append("")
+
+            try:
+                code = lead["currentPositions"][0]["companyUrnResolutionResult"]["entityUrn"].split(":")[-1]
+            except Exception:
+                code = 0
+            indv.append(code)
+            total_leads.append(indv)
+
+        n += 25
+        if n >= min(total_available, 2400):
+            break
+        time.sleep(0.3)
+
+    push_msg(f"Leads extracted: {len(total_leads)}")
+
+    columns1 = list1 + ["Sn_Link", "Linkedin ID URL"] + list2[:2] + \
+               ["yearsinposition", "monthsinposition", "yearsincompany", "monthsincompany", "code"]
+    df = pd.DataFrame(total_leads, columns=columns1)
+
+    if include_teamlinks:
+        df = TeamLinks(df, driver, cookies_, headers_)
+    if include_buying:
+        df = Buyingcenters(df)
+
+    return df
 
 # =========================
 # ===== Save / DB I/O  ====
@@ -512,9 +572,6 @@ def zoom_enrich(df_in: pd.DataFrame, driver: RemoteWebDriver, max_rows: int | No
 import sqlite3
 
 def ensure_table(conn: sqlite3.Connection):
-    # Optimize SQLite
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS sn_zoom_leads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -542,10 +599,6 @@ def ensure_table(conn: sqlite3.Connection):
         Email TEXT
     )
     """)
-    # Useful indexes
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sn_user_campaign ON sn_zoom_leads (user, campaign_name);")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sn_linkedin_url ON sn_zoom_leads (Linkedin_ID_URL);")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sn_company ON sn_zoom_leads (companyName);")
     conn.commit()
 
 def save_df_to_db(df: pd.DataFrame, campaign_name: str, user: str) -> int:
@@ -651,52 +704,11 @@ def fetch_from_db(user: str, campaign_name: str, limit: int = 200) -> pd.DataFra
         return pd.read_sql_query(q, conn, params=(user, campaign_name))
 
 # =========================
-# ===== Cookie cache  =====
-# =========================
-def _cache_path(name: str) -> Path:
-    return CACHE_DIR / f"{name}.bin"
-
-def save_encrypted_cache(name: str, obj: dict, ttl_hours: int = 12) -> bool:
-    if FERNET is None:
-        return False
-    payload = {
-        "expires_at": (datetime.utcnow() + timedelta(hours=ttl_hours)).isoformat(),
-        "data": obj
-    }
-    data = json.dumps(payload).encode("utf-8")
-    token = FERNET.encrypt(data)
-    _cache_path(name).write_bytes(token)
-    return True
-
-def load_encrypted_cache(name: str) -> dict | None:
-    if FERNET is None:
-        return None
-    p = _cache_path(name)
-    if not p.exists():
-        return None
-    try:
-        data = FERNET.decrypt(p.read_bytes())
-        payload = json.loads(data.decode("utf-8"))
-        if datetime.utcnow() > datetime.fromisoformat(payload["expires_at"]):
-            try: p.unlink()
-            except Exception: pass
-            return None
-        return payload.get("data", None)
-    except Exception:
-        return None
-
-def clear_cache(name: str):
-    p = _cache_path(name)
-    if p.exists():
-        try: p.unlink()
-        except Exception: pass
-
-# =========================
 # ===== UI — Controls  ====
 # =========================
 with st.sidebar:
     st.subheader("Browser & Auth")
-    ss.browser_choice = st.radio("Browser", ["Edge (unchanged)", "Chrome (attach @9222)"], index=0)
+    ss.browser_choice = st.radio("Browser", ["Edge (unchanged)", "Chrome (attach @9222)"], index=0, horizontal=False)
 
     if "Chrome" in ss.browser_choice:
         st.text_input("Debugger address (host:port)", key="chrome_debug_addr", value=ss.chrome_debug_addr)
@@ -715,11 +727,14 @@ with st.sidebar:
                     except Exception: pass
 
                 if "Edge" in ss.browser_choice:
+                    # EDGE: same logic as before
                     ss.driver = get_edge_driver()
                     st.success("Edge started (unchanged logic).")
                 else:
+                    # CHROME: attach-only to existing Chrome debug port
                     ss.driver = get_chrome_driver_attach(ss.chrome_debug_addr or "127.0.0.1:9222")
                     st.success(f"Attached to Chrome at {ss.chrome_debug_addr}.")
+
             except Exception as e:
                 st.error(f"Driver error: {e}")
     with colB:
@@ -734,50 +749,6 @@ with st.sidebar:
 
     st.text_input("Username (for credits log)", key="username", value=ss.get("username",""))
 
-    st.markdown("**Cookie cache (opt-in, encrypted)**")
-    crypto_ok = FERNET is not None
-    if not crypto_ok:
-        st.caption("Set EXL_COOKIE_KEY (Fernet) to enable encrypted cookie cache.")
-
-    cache_ttl = st.number_input("TTL (hours)", min_value=1, max_value=72, value=12)
-    colC1, colC2, colC3, colC4 = st.columns(4)
-    with colC1:
-        if st.button("Save SN cookies"):
-            if not crypto_ok:
-                st.error("Cookie cache disabled (no EXL_COOKIE_KEY).")
-            elif not ss.sn_cookies or not ss.sn_headers:
-                st.error("Capture SN cookies/headers first.")
-            else:
-                ok = save_encrypted_cache("sn_cookies", {"cookies": ss.sn_cookies, "headers": ss.sn_headers}, ttl_hours=cache_ttl)
-                st.success("Saved SN cookies to encrypted cache." if ok else "Failed to save cache.")
-    with colC2:
-        if st.button("Load SN cookies"):
-            data = load_encrypted_cache("sn_cookies")
-            if data:
-                ss.sn_cookies = data.get("cookies")
-                ss.sn_headers = data.get("headers")
-                st.success("Loaded SN cookies/headers from cache.")
-            else:
-                st.error("No valid SN cookie cache found.")
-    with colC3:
-        if st.button("Save SP cookies"):
-            if not crypto_ok:
-                st.error("Cookie cache disabled (no EXL_COOKIE_KEY).")
-            elif not ss.sp_cookies:
-                st.error("Fetch SP cookie first.")
-            else:
-                ok = save_encrypted_cache("sp_cookies", ss.sp_cookies, ttl_hours=cache_ttl)
-                st.success("Saved SP cookies." if ok else "Failed to save.")
-    with colC4:
-        if st.button("Load SP cookies"):
-            data = load_encrypted_cache("sp_cookies")
-            if data:
-                ss.sp_cookies = data
-                st.success("Loaded SP cookies from cache.")
-            else:
-                st.error("No valid SP cookie cache found.")
-
-    st.divider()
     if st.button("Get SharePoint cookie"):
         if not ss.driver:
             st.error("Open a browser first.")
@@ -802,13 +773,10 @@ with st.sidebar:
 
     st.divider()
     if st.button("Reset Page State"):
-        keys = ["sn_headers","sn_cookies","sp_cookies","sn_messages","sn_url_template","df_sn","df_enriched","last_successful_page"]
+        keys = ["sn_headers","sn_cookies","sp_cookies","sn_messages","sn_url_template","df_sn","df_enriched"]
         for k in keys:
-            if k == "sn_messages": ss[k] = []
-            elif "df_" in k: ss[k] = pd.DataFrame()
-            elif k == "last_successful_page": ss[k] = -1
-            else: ss[k] = None
-        st.success("State cleared.")
+            ss[k] = [] if k=="sn_messages" else (pd.DataFrame() if "df_" in k else None)
+        st.success("State cleared. Re-run the page if needed.")
 
 st.title("Lead.AI — Data Harvester (Split)")
 
@@ -858,165 +826,29 @@ if run_build:
         except Exception as e:
             st.error(f"Could not build SN URL: {e}")
 
-# ---- 1.5) Preflight credits vs total (no harvesting yet) ----
-col_pf1, col_pf2 = st.columns(2)
-with col_pf1:
-    if st.button("1.5) Preflight — Estimate total & credits"):
-        if not (ss.sn_url_template and ss.sn_cookies and ss.sn_headers):
-            st.error("Missing API template or SN auth. Capture cookies/headers and build URL first.")
-        elif not ss.username:
-            st.error("Enter Username (for SharePoint credits).")
-        else:
-            url0 = ss.sn_url_template.format(start=0)
-            r = SES.get(url0, cookies=ss.sn_cookies, headers=ss.sn_headers, timeout=REQ_TIMEOUT)
-            try:
-                js = r.json()
-                total_available = int(js["paging"]["total"])
-            except Exception:
-                st.error("Could not read total leads (JSON parse failed). Re-login to SN.")
-                total_available = 0
-
-            used, remaining = _read_sp_credits(ss.username)
-            total_capped = min(2400, total_available)
-            pages = math.ceil(total_capped / 25) if total_capped else 0
-
-            st.info(f"Total leads in search: **{total_available}** (capped to **{total_capped}**). Pages of 25: **{pages}**.")
-            st.info(f"Credits used in last 25h: **{used}**, remaining: **{remaining}**. "
-                    f"{'✅ Enough credits' if remaining >= total_capped else '⚠️ Not enough credits — narrow search or wait.'}")
-
-# ---- 2) Harvest with incremental batching + ETA ----
-prog = st.empty()
-stats = st.empty()
-tbl_ph = st.empty()
-
 c1, c2, c3 = st.columns(3)
 with c1:
-    if st.button("2) Harvest from Sales API (SN only) — Incremental"):
+    if st.button("2) Harvest from Sales API (SN only)"):
         if not (ss.sn_url_template and ss.sn_cookies and ss.sn_headers):
             st.error("Missing API template or SN auth. Capture cookies/headers and build URL first.")
         elif not ss.username:
             st.error("Enter Username (for SharePoint credits).")
         else:
-            # Preflight (also writes credit row if okay)
-            url0 = ss.sn_url_template.format(start=0)
-            r0 = SES.get(url0, cookies=ss.sn_cookies, headers=ss.sn_headers, timeout=REQ_TIMEOUT)
-            try:
-                js0 = r0.json()
-                total_available = int(js0["paging"]["total"])
-            except Exception:
-                push_msg("Sales API returned non-JSON. Re-login to Sales Navigator.")
-                st.error("Preflight failed (JSON).")
-                total_available = 0
-
-            if total_available > 2400:
-                push_msg("Search exceeds 2400 leads. Narrow filters.")
-                st.error("Capped at 2400; narrow your filters.")
-            elif total_available <= 0:
-                st.error("No leads found.")
-            else:
-                if credit_limit_sn(total_available, ss.username) != 0:
-                    st.error("Blocked by credits. See Messages section for details.")
+            with st.spinner("Harvesting from Sales API…"):
+                df = Lead_details_SN_only(
+                    ss.sn_url_template,
+                    ss.sn_cookies,
+                    ss.sn_headers,
+                    ss.username,
+                    ss.driver,
+                    include_teamlinks=include_teamlinks,
+                    include_buying=include_buying,
+                )
+                ss.df_sn = df
+                if df is None or df.empty:
+                    st.error("No leads found or blocked by credits.")
                 else:
-                    # Start incremental loop
-                    list1 = ["fullName", "lastName", "firstName", "geoRegion"]
-                    list2 = ["companyName", "title", "tenureAtPosition", "tenureAtCompany"]
-                    list4 = ["numYears", "numMonths"]
-
-                    total_capped = min(2400, total_available)
-                    total_pages = math.ceil(total_capped / 25)
-                    rows_accum = []
-                    t0 = time.time()
-                    ss.last_successful_page = -1
-
-                    for page_idx in range(total_pages):
-                        start = page_idx * 25
-                        url = ss.sn_url_template.format(start=start)
-                        r = SES.get(url, cookies=ss.sn_cookies, headers=ss.sn_headers, timeout=REQ_TIMEOUT)
-
-                        if r.status_code != 200:
-                            push_msg(f"HTTP {r.status_code} on page {page_idx}. Stopping.")
-                            break
-                        try:
-                            js = r.json()
-                        except Exception:
-                            push_msg(f"JSON parse error on page {page_idx}. Stopping.")
-                            break
-
-                        elements = js.get("elements", [])
-                        if not elements:
-                            break
-
-                        for lead in elements:
-                            indv = []
-                            for k in list1:
-                                indv.append(lead.get(k, ""))
-
-                            try:
-                                profile_ID = lead["entityUrn"].split("(")[1].split(",")[0]
-                                indv += [f"https://www.linkedin.com/sales/lead/{profile_ID},", f"https://www.linkedin.com/in/{profile_ID}"]
-                            except Exception:
-                                indv += ["", ""]
-
-                            for j in range(len(list2)):
-                                if j < 2:
-                                    try:
-                                        indv.append(lead["currentPositions"][0][list2[j]])
-                                    except Exception:
-                                        indv.append("")
-                                else:
-                                    for k in list4:
-                                        try:
-                                            indv.append(lead["currentPositions"][0][list2[j]][k])
-                                        except Exception:
-                                            indv.append("")
-
-                            try:
-                                code = lead["currentPositions"][0]["companyUrnResolutionResult"]["entityUrn"].split(":")[-1]
-                            except Exception:
-                                code = 0
-                            indv.append(code)
-                            rows_accum.append(indv)
-
-                        # Mark last completed page
-                        ss.last_successful_page = page_idx
-
-                        # Update progress + ETA
-                        fetched = len(rows_accum)
-                        elapsed = max(0.001, time.time() - t0)
-                        pages_done = page_idx + 1
-                        rows_per_min = (fetched / elapsed) * 60.0
-                        avg_page_sec = elapsed / pages_done
-                        pages_remaining = max(0, total_pages - pages_done)
-                        eta_sec = pages_remaining * avg_page_sec
-
-                        prog.progress(pages_done / total_pages)
-                        stats.info(f"Pages: {pages_done}/{total_pages} • Rows: {fetched}/{total_capped} "
-                                   f"• Speed: {rows_per_min:0.0f} rows/min • ETA: {eta_sec/60:0.1f} min "
-                                   f"• Last successful page: {ss.last_successful_page}")
-
-                        # Build partial df and show
-                        columns1 = list1 + ["Sn_Link", "Linkedin ID URL"] + list2[:2] + \
-                                   ["yearsinposition", "monthsinposition", "yearsincompany", "monthsincompany", "code"]
-                        df_partial = pd.DataFrame(rows_accum, columns=columns1)
-
-                        # Optional SN-only enrichments that do NOT scrape ZoomInfo (do them after all pages to be faster)
-                        # But to keep "incremental grid" responsive, we only show the raw partial table here:
-                        tbl_ph.dataframe(df_partial.tail(200), use_container_width=True)
-
-                        time.sleep(0.15)  # tiny pacing to keep UI responsive
-
-                    # Final dataframe + optional enrichments
-                    columns1 = ["fullName","lastName","firstName","geoRegion","Sn_Link","Linkedin ID URL",
-                                "companyName","title","yearsinposition","monthsinposition","yearsincompany","monthsincompany","code"]
-                    ss.df_sn = pd.DataFrame(rows_accum, columns=columns1)
-
-                    if include_teamlinks and not ss.df_sn.empty:
-                        ss.df_sn = TeamLinks(ss.df_sn, ss.driver, ss.sn_cookies, ss.sn_headers)
-                    if include_buying and not ss.df_sn.empty:
-                        ss.df_sn = Buyingcenters(ss.df_sn)
-
-                    tbl_ph.dataframe(ss.df_sn.head(200), use_container_width=True)
-                    st.success(f"Leads harvested: {len(ss.df_sn)} (SN only)")
+                    st.success(f"Leads harvested: {len(df)} (SN only)")
 
 with c2:
     if st.button("3) Save SN-only rows to DB"):
@@ -1051,6 +883,7 @@ st.divider()
 
 # -------- Phase 2: ZoomInfo enrichment (optional) --------
 st.markdown("## Phase 2 — ZoomInfo (optional enrichment)")
+
 with st.container():
     colz1, colz2, colz3, colz4 = st.columns([1,1,1,1])
     with colz1:
